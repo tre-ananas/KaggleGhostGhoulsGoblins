@@ -210,38 +210,79 @@ rf_preds <- predict(rf_final_wf,
 # Create a CSV with the predictions
 vroom_write(x=rf_preds, file="rf_preds_2.csv", delim = ",")
 
+#################################################################
+#################################################################
+# Single-Layer Neural Network                       #############
+#################################################################
+#################################################################
 
+# Load Libraries
+library(vroom)
+library(tidyverse)
+library(tidymodels)
 
+# Load Data
+ggg_train <- vroom("train.csv")
+ggg_test <- vroom("test.csv")
 
-# Examine Results for Potential Areas to Improve --------------------------------------------
+# Turn "type" into factor
+ggg_train$type <- as.factor(ggg_train$type)
 
-# Extract the final model
-final_model <- rf_final_wf$fit$fit
-final_model
+# Recipe (leave out 'id')
+nn_rec <- recipe(type ~ bone_length + rotting_flesh + hair_length + has_soul + color, data = ggg_train) %>%
+  step_dummy(color)
+  step_zv(all_predictors()) %>%
+  step_range(all_numeric_predictors(), min = 0, max = 1) # Scale Xs to [0, 1]
 
-# Best Tuning Parameters
-rf_best_tune
+nn_prep <- prep(nn_rec)
+bake(nn_prep, ggg_train)
 
-# Ensure training data was balanced
-table(ggg_train$type)
+# Create Neural Network model specification
+nn_spec <- mlp(hidden_units = tune(),
+               epochs = 100) %>%
+  set_engine("nnet") %>%
+  set_mode('classification')
 
-# Test model on training data to see what it is classifying incorrectly ----------------------
+# Create classification NN workflow
+nn_wf <- workflow() %>%
+  add_recipe(nn_rec) %>%
+  add_model(nn_spec)
 
-# Predict class for training data
-train_preds <- predict(rf_final_wf, new_data = ggg_train) %>%
-  bind_cols(ggg_train) %>%
-  rename(predicted_type = .pred_class)
+# Grid of values to tune over
+nn_tg <- grid_regular(hidden_units(range = c(1, 5)),
+                      levels = 5)
 
-# Identify misclassified samples
-misclassified_samples <- train_preds %>%
-  filter(type != predicted_type) %>%
-  select(id, type, predicted_type)
+# Split data for cross-validation (CV)
+nn_folds <- vfold_cv(ggg_train, v = 5, repeats = 1)
 
-# View misclassified samples with axes
-print(misclassified_samples)
+# Run cross-validation
+nn_cv_results <- nn_wf %>%
+  tune_grid(resamples = nn_folds,
+            grid = nn_tg,
+            metrics = metric_set(accuracy))
 
-# Count misclassified samples for each type
-table(misclassified_samples$type, misclassified_samples$predicted_type)
+# Find best tuning parameters
+nn_best_tune <- nn_cv_results %>%
+  select_best("accuracy")
 
+# Finalize workflow and fit it
+nn_final_wf <- nn_wf %>%
+  finalize_workflow(nn_best_tune) %>%
+  fit(data = ggg_train)
 
+# Plot cross-validation with hidden_units on the x-axis and mean(accuracy) on the y-axis for class
+nn_cv_results %>% collect_metrics() %>%
+  filter(.metric=="accuracy") %>%
+  ggplot(aes(x=hidden_units, y=mean)) + geom_line()
 
+# Predict class
+nn_preds <- predict(nn_final_wf,
+                     new_data = ggg_test,
+                     type = "class") %>%
+  bind_cols(ggg_test$id, .) %>%
+  rename(type = .pred_class) %>%
+  rename(id = ...1) %>%
+  select(id, type)
+
+# Create a CSV with the predictions
+vroom_write(x=nn_preds, file="nn_preds.csv", delim = ",")
