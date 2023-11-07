@@ -290,7 +290,7 @@ vroom_write(x=nn_preds, file="nn_preds_2.csv", delim = ",")
 
 #################################################################
 #################################################################
-# Support Vector Machines                       ##################
+# Support Vector Machines                      ##################
 #################################################################
 #################################################################
 
@@ -335,8 +335,6 @@ hs_bw <- ggplot(ggg_train, aes(x = type, y = has_soul, fill = type)) +
 # Create a 4-Way Plot of box and whisker plots
 fourway_bw <- (bl_bw + rf_bw) / (hl_bw + hs_bw)
 fourway_bw
-
-library(ggplot2)
 
 # Scatter plot for id vs. bone_length
 bl_sp <- ggplot(ggg_train, aes(x = id, y = bone_length, color = type)) +
@@ -410,7 +408,7 @@ svms_lin_tg <- grid_regular(cost(),
 # Grid of values to tune over (radial)
 svms_rad_tg <- grid_regular(rbf_sigma(),
                             cost(),
-                            levels = 15)
+                            levels = 10)
 
 # Grid of values to tune over (poly)
 svms_poly_tg <- grid_regular(degree(),
@@ -506,3 +504,237 @@ vroom_write(x=svms_rad_preds, file="svms_rad_preds_3.csv", delim = ",")
 
 # Create a CSV with the predictions (poly)
 vroom_write(x=svms_poly_preds, file="svms_poly_preds_3.csv", delim = ",")
+
+#################################################################
+#################################################################
+# Support Vector Machines with Recursive Feature Elimination ####
+#################################################################
+#################################################################
+
+# Load Libraries
+library(vroom)
+library(tidymodels)
+library(tidyverse)
+library(embed)
+library(kernlab)
+library(caret)
+library(ggplot2)
+library(e1071)
+
+# Load Data
+ggg_train <- vroom("train.csv")
+ggg_test <- vroom("test.csv")
+
+# Turn "type" and "color" into factors
+ggg_train$type <- as.factor(ggg_train$type)
+ggg_train$color <- as.factor(ggg_train$color)
+
+# Define the control parameters for the RFE
+ctrl <- rfeControl(functions=rfFuncs, 
+                   method="cv", 
+                   number=10)
+
+# Specify the features and the target variable
+features <- c("bone_length", "rotting_flesh", "hair_length", "has_soul", "color")
+target <- "type"  # Replace with your target variable name
+
+# Create the RFE model
+# Random Forest
+rfe_model <- rfe(x = ggg_train[features], y = ggg_train[[target]], sizes=c(1:length(features)),
+                 rfeControl=ctrl, metric = "Accuracy")
+# Support Vector Machine - Linear
+rfe_model <- rfe(x = ggg_train[features], y = ggg_train[[target]], sizes=c(1:length(features)),
+                 rfeControl=rfeControl(functions=rfFuncs, method="cv", number=10),
+                 method="svmLinear", metric = "Accuracy")
+# Support Vector Machine - Radial
+rfe_model <- rfe(x = ggg_train[features], y = ggg_train[[target]], sizes=c(1:length(features)),
+                 rfeControl=rfeControl(functions=rfFuncs, method="cv", number=10),
+                 method="svmRadial", metric = "Accuracy")
+# Gradient Boosted Machines
+rfe_model <- rfe(x = ggg_train[features], y = ggg_train[[target]], sizes=c(1:length(features)),
+                 rfeControl=rfeControl(functions=rfFuncs, method="cv", number=10),
+                 method="gbm", metric = "Accuracy")
+# Linear Regression
+rfe_model <- rfe(x = ggg_train[features], y = ggg_train[[target]], sizes=c(1:length(features)),
+                 rfeControl=rfeControl(functions=rfFuncs, method="cv", number=10),
+                 method="lm", metric = "Accuracy")
+
+# Print the results
+print(rfe_model)
+
+# Get the selected features
+selected_features <- rfe_model$optVariables
+selected_features
+
+# Random Forest:
+# 1 hair_length
+# 2 has_soul
+# 3 bone_length
+# 4 rotting_flesh
+
+# SVM Linear:
+# 1 hair_length
+# 2 has_soul
+# 3 bone_length
+# 4 rotting_flesh
+
+# SVM Radial:
+# 1 hair_length
+# 2 has_soul
+# 3 bone_length
+# 4 rotting_flesh
+
+# GBM:
+# 1 hair_length
+# 2 has_soul
+# 3 rotting_flesh
+# 4 bone_length
+
+# Linear Regression:
+# 1 hair_length
+# 2 has_soul
+# 3 rotting_flesh
+# 4 bone_length
+
+# Recipe (leave out 'id')
+svms_rec <- recipe(type ~ bone_length + rotting_flesh + hair_length + has_soul, data = ggg_train) %>%
+  step_normalize(all_predictors())
+
+svms_prep <- prep(svms_rec)
+bake(svms_prep, ggg_train)
+
+# Create linear SVMS model
+svms_lin_mod <- svm_linear(cost = tune()) %>%
+  set_mode("classification") %>%
+  set_engine("kernlab")
+
+# Create radial SVMS model
+svms_rad_mod <- svm_rbf(rbf_sigma = tune(),
+                        cost = tune()) %>%
+  set_mode("classification") %>%
+  set_engine("kernlab")
+
+# Create poly SVMS model
+svms_poly_mod <- svm_poly(degree = tune(),
+                          cost = tune()) %>%
+  set_mode("classification") %>%
+  set_engine("kernlab")
+
+# Create linear SVMS workflow
+svms_lin_wf <- workflow() %>%
+  add_recipe(svms_rec) %>%
+  add_model(svms_lin_mod)
+
+# Create radial SVMS workflow
+svms_rad_wf <- workflow() %>%
+  add_recipe(svms_rec) %>%
+  add_model(svms_rad_mod)
+
+# Create poly SVMS workflow
+svms_poly_wf <- workflow() %>%
+  add_recipe(svms_rec) %>%
+  add_model(svms_poly_mod)
+
+# Grid of values to tune over (linear)
+svms_lin_tg <- grid_regular(cost(),
+                            levels = 10)
+
+# Grid of values to tune over (radial)
+svms_rad_tg <- grid_regular(rbf_sigma(),
+                            cost(),
+                            levels = 10)
+
+# Grid of values to tune over (poly)
+svms_poly_tg <- grid_regular(degree(),
+                            cost(),
+                            levels = 10)
+
+# Split data for cross-validation (CV) (linear)
+svms_lin_folds <- vfold_cv(ggg_train, v = 5, repeats = 1)
+
+# Split data for cross-validation (CV) (radial)
+svms_rad_folds <- vfold_cv(ggg_train, v = 5, repeats = 1)
+
+# Split data for cross-validation (CV) (poly)
+svms_poly_folds <- vfold_cv(ggg_train, v = 5, repeats = 1)
+
+# Run cross-validation (linear)
+svms_lin_cv_results <- svms_lin_wf %>%
+  tune_grid(resamples = svms_lin_folds,
+            grid = svms_lin_tg,
+            metrics = metric_set(accuracy))
+
+# Run cross-validation (radial)
+svms_rad_cv_results <- svms_rad_wf %>%
+  tune_grid(resamples = svms_rad_folds,
+            grid = svms_rad_tg,
+            metrics = metric_set(accuracy))
+
+# Run cross-validation (poly)
+svms_poly_cv_results <- svms_poly_wf %>%
+  tune_grid(resamples = svms_poly_folds,
+            grid = svms_poly_tg,
+            metrics = metric_set(accuracy))
+
+# Find best tuning parameters (linear)
+svms_lin_best_tune <- svms_lin_cv_results %>%
+  select_best("accuracy")
+
+# Find best tuning parameters (radial)
+svms_rad_best_tune <- svms_rad_cv_results %>%
+  select_best("accuracy")
+
+# Find best tuning parameters (poly)
+svms_poly_best_tune <- svms_poly_cv_results %>%
+  select_best("accuracy")
+
+# Finalize workflow and fit it (linear)
+svms_lin_final_wf <- svms_lin_wf %>%
+  finalize_workflow(svms_lin_best_tune) %>%
+  fit(data = ggg_train)
+
+# Finalize workflow and fit it (radial)
+svms_rad_final_wf <- svms_rad_wf %>%
+  finalize_workflow(svms_rad_best_tune) %>%
+  fit(data = ggg_train)
+
+# Finalize workflow and fit it (poly)
+svms_poly_final_wf <- svms_poly_wf %>%
+  finalize_workflow(svms_poly_best_tune) %>%
+  fit(data = ggg_train)
+
+# Predict class (linear)
+svms_lin_preds <- predict(svms_lin_final_wf,
+                     new_data = ggg_test,
+                     type = "class") %>%
+  bind_cols(ggg_test$id, .) %>%
+  rename(type = .pred_class) %>%
+  rename(id = ...1) %>%
+  select(id, type)
+
+# Predict class (radial)
+svms_rad_preds <- predict(svms_rad_final_wf,
+                     new_data = ggg_test,
+                     type = "class") %>%
+  bind_cols(ggg_test$id, .) %>%
+  rename(type = .pred_class) %>%
+  rename(id = ...1) %>%
+  select(id, type)
+
+# Predict class (poly)
+svms_poly_preds <- predict(svms_poly_final_wf,
+                     new_data = ggg_test,
+                     type = "class") %>%
+  bind_cols(ggg_test$id, .) %>%
+  rename(type = .pred_class) %>%
+  rename(id = ...1) %>%
+  select(id, type)
+
+# Create a CSV with the predictions (linear)
+vroom_write(x=svms_lin_preds, file="svms_lin_preds_4.csv", delim = ",")
+
+# Create a CSV with the predictions (radial)
+vroom_write(x=svms_rad_preds, file="svms_rad_preds_5.csv", delim = ",")
+
+# Create a CSV with the predictions (poly)
+vroom_write(x=svms_poly_preds, file="svms_poly_preds_5.csv", delim = ",")
