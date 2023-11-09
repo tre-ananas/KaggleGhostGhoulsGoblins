@@ -78,10 +78,7 @@ ggg_train$type <- as.factor(ggg_train$type)
 
 # Recipe (leave out 'id')
 xgb_rec <- recipe(type ~ bone_length + rotting_flesh + hair_length + has_soul + color, data = ggg_train) %>%
-  step_lencode_glm(color, outcome = vars(type)) %>% # glm allows you to target encode a factor on a factor
-  step_zv(all_predictors()) %>%
-  step_center(all_predictors()) %>%
-  step_scale(all_predictors())
+  step_lencode_glm(color, outcome = vars(type))# glm allows you to target encode a factor on a factor
 
 xgb_prep <- prep(xgb_rec)
 bake(xgb_prep, ggg_train)
@@ -97,11 +94,11 @@ xgb_wf <- workflow() %>%
   add_model(xgb_spec)
 
 xgb_grid <- grid_regular(
-  trees(range = c(500, 1000)),
-  tree_depth(range = c(3, 10)),
+  trees(range = c(100, 1000)),
+  tree_depth(range = c(1, 10)),
   min_n(range = c(1, 10)),
   learn_rate(range = c(0.01, 0.1)),
-  levels = 5
+  levels = 10
 )
 
 # Split data for cross-validation (CV)
@@ -132,7 +129,7 @@ xgb_preds <- predict(xgb_final_wf,
   select(id, type)
 
 # Create a CSV with the predictions
-vroom_write(x=xgb_preds, file="xgb_preds_2.csv", delim = ",")
+vroom_write(x=xgb_preds, file="xgb_preds_3.csv", delim = ",")
 
 #################################################################
 #################################################################
@@ -738,3 +735,303 @@ vroom_write(x=svms_rad_preds, file="svms_rad_preds_5.csv", delim = ",")
 
 # Create a CSV with the predictions (poly)
 vroom_write(x=svms_poly_preds, file="svms_poly_preds_5.csv", delim = ",")
+
+#################################################################
+#################################################################
+# K Nearest Neighbors                     #######################
+#################################################################
+#################################################################
+
+# Load Libraries
+library(vroom)
+library(tidymodels)
+library(tidyverse)
+library(embed)
+library(kknn)
+
+# Load Data
+ggg_train <- vroom("train.csv")
+ggg_test <- vroom("test.csv")
+
+# Turn "type" and "color" into factors
+ggg_train$type <- as.factor(ggg_train$type)
+
+# Recipe (leave out 'id')
+knn_rec <- recipe(type ~ bone_length + rotting_flesh + hair_length + has_soul + color, data = ggg_train) %>%
+  step_dummy(color) %>%
+  step_normalize(all_numeric_predictors())
+
+knn_prep <- prep(knn_rec)
+bake(knn_prep, ggg_train)
+
+# Create KNN model specification
+knn_mod <- nearest_neighbor(neighbors = tune()) %>%
+  set_mode("classification") %>%
+  set_engine("kknn")
+
+# Create KNN workflow
+knn_wf <- workflow() %>%
+  add_recipe(knn_rec) %>%
+  add_model(knn_mod)
+
+# Grid of values to tune over
+knn_tg <- grid_regular(neighbors(),
+                      levels = 10)
+
+# Split data for cross-validation (CV)
+knn_folds <- vfold_cv(ggg_train, v = 5, repeats = 1)
+
+# Run cross-validation
+knn_cv_results <- knn_wf %>%
+  tune_grid(resamples = knn_folds,
+            grid = knn_tg,
+            metrics = metric_set(accuracy))
+
+# Find best tuning parameters
+knn_best_tune <- knn_cv_results %>%
+  select_best("accuracy")
+
+# Finalize workflow and fit it
+knn_final_wf <- knn_wf %>%
+  finalize_workflow(knn_best_tune) %>%
+  fit(data = ggg_train)
+
+# Predict class
+knn_preds <- predict(knn_final_wf,
+                     new_data = ggg_test,
+                     type = "class") %>%
+  bind_cols(ggg_test$id, .) %>%
+  rename(type = .pred_class) %>%
+  rename(id = ...1) %>%
+  select(id, type)
+
+# Create a CSV with the predictions
+vroom_write(x=knn_preds, file="knn_preds_1.csv", delim = ",")
+
+#################################################################
+#################################################################
+# Model Stacking - Linear and Radial SVMs        ################
+#################################################################
+#################################################################
+
+# Load Libraries
+library(vroom)
+library(tidymodels)
+library(tidyverse)
+library(embed)
+library(lme4)
+library(stacks)
+
+# Load Data
+ggg_train <- vroom("train.csv")
+ggg_test <- vroom("test.csv")
+
+# Turn "type" and "color" into factors
+ggg_train$type <- as.factor(ggg_train$type)
+
+# Recipe (leave out 'id')
+svms_rec <- recipe(type ~ bone_length + rotting_flesh + hair_length + has_soul + color, data = ggg_train) %>%
+  step_mutate_at(color, fn = factor) %>%
+  step_dummy(color) %>%
+  step_normalize(all_predictors())
+
+svms_prep <- prep(svms_rec)
+bake(svms_prep, ggg_train)
+
+# Set up cross validation
+stack_folds <- vfold_cv(ggg_train,
+                  v = 10,
+                  repeats = 1) # Split data for CV
+
+stack_untuned_model <- control_stack_grid() # Control grid for tuning over a grid
+stack_tuned_model <- control_stack_resamples() # Control grid for models we aren't tuning
+
+# Create linear SVMS model
+svms_lin_mod <- svm_linear(cost = tune()) %>%
+  set_mode("classification") %>%
+  set_engine("kernlab")
+
+# Create radial SVMS model
+svms_rad_mod <- svm_rbf(rbf_sigma = tune(),
+                        cost = tune()) %>%
+  set_mode("classification") %>%
+  set_engine("kernlab")
+
+# Create linear SVMS workflow
+svms_lin_wf <- workflow() %>%
+  add_recipe(svms_rec) %>%
+  add_model(svms_lin_mod)
+
+# Create radial SVMS workflow
+svms_rad_wf <- workflow() %>%
+  add_recipe(svms_rec) %>%
+  add_model(svms_rad_mod)
+
+# Grid of values to tune over (linear)
+svms_lin_tg <- grid_regular(cost(),
+                            levels = 5)
+
+# Grid of values to tune over (radial)
+svms_rad_tg <- grid_regular(rbf_sigma(),
+                            cost(),
+                            levels = 10)
+
+# Run cross-validation (linear)
+svms_lin_cv_results <- svms_lin_wf %>%
+  tune_grid(resamples = stack_folds,
+            grid = svms_lin_tg,
+            metrics = metric_set(roc_auc),
+            control = stack_untuned_model)
+
+# Run cross-validation (radial)
+svms_rad_cv_results <- svms_rad_wf %>%
+  tune_grid(resamples = stack_folds,
+            grid = svms_rad_tg,
+            metrics = metric_set(roc_auc),
+            control = stack_untuned_model)
+
+# Specify models to include in stacked model
+stack_stack <- stacks() %>%
+  add_candidates(svms_lin_cv_results) %>%
+  add_candidates(svms_rad_cv_results)
+
+# Fit model w/ LASSO penalized regression meta-learner
+stacked_model <- stack_stack %>%
+  blend_predictions() %>%
+  fit_members()
+
+# Predict class (stacked)
+stacked_preds <- predict(stacked_model,
+                     new_data = ggg_test,
+                     type = "class") %>%
+  bind_cols(ggg_test$id, .) %>%
+  rename(type = .pred_class) %>%
+  rename(id = ...1) %>%
+  select(id, type)
+
+# Create a CSV with the predictions (linear)
+vroom_write(x=stacked_preds, file="stacked_preds.csv", delim = ",")
+
+#################################################################
+#################################################################
+# Boosted Trees and BART                         ################
+#################################################################
+#################################################################
+
+# Load Libraries
+library(vroom)
+library(tidyverse)
+library(tidymodels)
+library(bonsai)
+library(lightgbm)
+library(embed)
+
+# Load Data
+ggg_train <- vroom("train.csv")
+ggg_test <- vroom("test.csv")
+
+# Turn "type" into factor
+ggg_train$type <- as.factor(ggg_train$type)
+
+# Recipe (leave out 'id')
+bst_brt_rec <- recipe(type ~ bone_length + rotting_flesh + hair_length + has_soul + color, data = ggg_train) %>%
+  step_lencode_glm(color, outcome = vars(type)) %>% # glm allows you to target encode a factor on a factor
+  step_zv(all_predictors()) %>%
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors())
+
+bst_brt_rec <- prep(bst_brt_rec)
+bake(bst_brt_rec, ggg_train)
+
+# Create a Boost model specification
+bst_spec <- boost_tree(trees = tune(), tree_depth = tune(), learn_rate = tune()) %>%
+  set_engine("lightgbm") %>%
+  set_mode("classification")
+
+# Create a BART model specification
+bart_spec <- bart(trees = tune()) %>%
+  set_engine("dbarts") %>%
+  set_mode("classification")
+
+# Create a Boost Workflow
+bst_wf <- workflow() %>%
+  add_recipe(bst_brt_rec) %>%
+  add_model(bst_spec)
+
+# BART workflow
+bart_wf <- workflow() %>%
+  add_recipe(bst_brt_rec) %>%
+  add_model(bart_spec)
+
+# Set up Boost tuning grid
+bst_grid <- grid_regular(
+  trees(range = c(500, 1000)),
+  tree_depth(range = c(3, 10)),
+  learn_rate(range = c(0.01, 0.1)),
+  levels = 5
+)
+
+# Set up BART tuning grid
+bart_grid <- grid_regular(
+  trees(range = c(500, 1000)),
+        levels = 5)
+
+# Split data for cross-validation (CV) for boost
+bst_folds <- vfold_cv(ggg_train, v = 5, repeats = 1)
+
+# Split data for cross-validation (CV) for bart
+bart_folds <- vfold_cv(ggg_train, v = 5, repeats = 1)
+
+# Run cross-validation for boost
+bst_cv_results <- bst_wf %>%
+  tune_grid(resamples = bst_folds,
+            grid = bst_grid,
+            metrics = metric_set(accuracy))
+
+# Run cross-validation for bart
+bart_cv_results <- bart_wf %>%
+  tune_grid(resamples = bart_folds,
+            grid = bart_grid,
+            metrics = metric_set(accuracy))
+
+# Find best tuning parameters (boost)
+bst_best_tune <- bst_cv_results %>%
+  select_best("accuracy")
+
+# Find best tuning parameters (bart)
+bart_best_tune <- bart_cv_results %>%
+  select_best("accuracy")
+
+# Finalize workflow and fit it (boost)
+bst_final_wf <- bst_wf %>%
+  finalize_workflow(bst_best_tune) %>%
+  fit(data = ggg_train)
+
+# Finalize workflow and fit it (bart)
+bart_final_wf <- bart_wf %>%
+  finalize_workflow(bart_best_tune) %>%
+  fit(data = ggg_train)
+
+# Predict class (Boost)
+bst_preds <- predict(bst_final_wf,
+                     new_data = ggg_test,
+                     type = "class") %>%
+  bind_cols(ggg_test$id, .) %>%
+  rename(type = .pred_class) %>%
+  rename(id = ...1) %>%
+  select(id, type)
+
+# Predict class (Bart)
+bart_preds <- predict(bart_final_wf,
+                     new_data = ggg_test,
+                     type = "class") %>%
+  bind_cols(ggg_test$id, .) %>%
+  rename(type = .pred_class) %>%
+  rename(id = ...1) %>%
+  select(id, type)
+
+# Create a CSV with the predictions (boost)
+vroom_write(x=bst_preds, file="bst_preds.csv", delim = ",")
+
+# Create a CSV with the predictions (bart)
+vroom_write(x=bart_preds, file="bart_preds.csv", delim = ",")
