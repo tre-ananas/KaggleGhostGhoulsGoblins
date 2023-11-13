@@ -22,11 +22,11 @@
 ########################################################################
 ########################################################################
 
-# #################################################################
-# #################################################################
-# # Impute Missing Data from Special Missing Data Set #############
-# #################################################################
-# #################################################################
+#################################################################
+#################################################################
+# Impute Missing Data from Special Missing Data Set #############
+#################################################################
+#################################################################
 
 # Load Libraries
 library(vroom)
@@ -1035,3 +1035,209 @@ vroom_write(x=bst_preds, file="bst_preds.csv", delim = ",")
 
 # Create a CSV with the predictions (bart)
 vroom_write(x=bart_preds, file="bart_preds.csv", delim = ",")
+
+
+#################################################################
+#################################################################
+# NAIVE BAYES                                     ################
+#################################################################
+#################################################################
+
+# Load Libraries
+library(vroom)
+library(tidyverse)
+library(tidymodels)
+library(naivebayes)
+library(discrim)
+library(embed)
+
+# Load Data
+ggg_train <- vroom("train.csv")
+ggg_test <- vroom("test.csv")
+
+# Turn "type" into factor
+ggg_train$type <- as.factor(ggg_train$type)
+
+# Create Recipe
+nb_rec <- recipe(type ~ bone_length + rotting_flesh + hair_length + has_soul, data = ggg_train) %>%
+  step_normalize(all_numeric_predictors())
+
+# Prep, Bake, and View Recipe
+nb_prep <- prep(nb_rec)
+bake(nb_prep, ggg_train) %>%
+  slice(1:10)
+
+# Create Naive Bayes model
+nb_mod <- naive_Bayes(Laplace = tune(),
+                      smoothness = tune()) %>%
+  set_mode("classification") %>%
+  set_engine("naivebayes")
+
+# Create Naive Bayes workflow
+nb_wf <- workflow() %>%
+  add_recipe(nb_rec) %>%
+  add_model(nb_mod)
+
+# Grid of values to tune over
+nb_tg <- grid_regular(Laplace(),
+                      smoothness(),
+                      levels = 10)
+
+# Split data for cross-validation (CV)
+nb_folds <- vfold_cv(ggg_train, v = 5, repeats = 1)
+
+# Run cross-validation
+nb_cv_results <- nb_wf %>%
+  tune_grid(resamples = nb_folds,
+            grid = nb_tg,
+            metrics = metric_set(accuracy))
+
+# Find best tuning parameters
+nb_best_tune <- nb_cv_results %>%
+  select_best("accuracy")
+
+# Finalize workflow and fit it
+nb_final_wf <- nb_wf %>%
+  finalize_workflow(nb_best_tune) %>%
+  fit(data = ggg_train)
+
+# Predict class (Naive Bayes)
+nb_preds <- predict(nb_final_wf,
+                     new_data = ggg_test,
+                     type = "class") %>%
+  bind_cols(ggg_test$id, .) %>%
+  rename(type = .pred_class) %>%
+  rename(id = ...1) %>%
+  select(id, type)
+
+# Create a CSV with the predictions
+vroom_write(x=nb_preds, file="nb_preds_4.csv", delim = ",")
+
+#################################################################
+#################################################################
+# Model Stacking - Radial SVM, RF, and NB        ################
+#################################################################
+#################################################################
+
+# Load Libraries
+library(vroom)
+library(tidymodels)
+library(tidyverse)
+library(embed)
+library(lme4)
+library(stacks)
+library(naivebayes)
+library(discrim)
+library(kernlab)
+library(parsnip)
+
+# Load Data
+ggg_train <- vroom("train.csv")
+ggg_test <- vroom("test.csv")
+
+# Turn "type" and "color" into factors
+ggg_train$type <- as.factor(ggg_train$type)
+
+# --------------------------------------------------------------------------------------------
+
+# RF Recipe
+rf_rec <- recipe(type ~ bone_length + rotting_flesh + hair_length + has_soul, data = ggg_train) %>%
+  step_zv(all_predictors()) %>%
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors())
+rf_prep <- prep(rf_rec)
+bake(rf_prep, ggg_train)
+
+# NB Recipe
+nb_rec <- recipe(type ~ bone_length + rotting_flesh + hair_length + has_soul, data = ggg_train) %>%
+  step_normalize(all_numeric_predictors())
+nb_prep <- prep(nb_rec)
+bake(nb_prep, ggg_train)
+
+# SVMS Recipe
+svms_rec <- recipe(type ~ bone_length + rotting_flesh + hair_length + has_soul + color, data = ggg_train) %>%
+  step_mutate_at(color, fn = factor) %>%
+  step_dummy(color) %>%
+  step_normalize(all_predictors())
+svms_prep <- prep(svms_rec)
+bake(svms_prep, ggg_train)
+
+
+#################################################################
+#################################################################
+# NAIVE BAYES AGAIN                              ################
+#################################################################
+#################################################################
+
+# Load Libraries
+library(vroom)
+library(tidyverse)
+library(tidymodels)
+library(naivebayes)
+library(discrim)
+library(embed)
+
+# Load Data
+ggg_train <- vroom("train.csv")
+ggg_test <- vroom("test.csv")
+
+# Turn "type" into factor
+ggg_train$type <- as.factor(ggg_train$type)
+
+# Create Recipe
+nb_rec <- recipe(type ~ bone_length + rotting_flesh + hair_length + has_soul + color, data = ggg_train) %>%
+  step_mutate_at(color, fn = factor) %>%
+  step_lencode_glm(color, outcome = vars(type)) %>%
+  step_normalize(all_numeric_predictors())
+
+# Prep, Bake, and View Recipe
+nb_prep <- prep(nb_rec)
+bake(nb_prep, ggg_train) %>%
+  slice(1:10)
+
+# Create Naive Bayes model
+nb_mod <- naive_Bayes(Laplace = tune(),
+                      smoothness = tune()) %>%
+  set_mode("classification") %>%
+  set_engine("naivebayes")
+
+# Create Naive Bayes workflow
+nb_wf <- workflow() %>%
+  add_recipe(nb_rec) %>%
+  add_model(nb_mod)
+
+# Grid of values to tune over
+nb_tg <- grid_regular(Laplace(),
+                      smoothness(),
+                      levels = 5)
+
+# Split data for cross-validation (CV)
+nb_folds <- vfold_cv(ggg_train, v = 5, repeats = 1)
+
+# Run cross-validation
+nb_cv_results <- nb_wf %>%
+  tune_grid(resamples = nb_folds,
+            grid = nb_tg,
+            metrics = metric_set(accuracy))
+
+# Find best tuning parameters
+nb_best_tune <- nb_cv_results %>%
+  select_best("accuracy")
+
+# Finalize workflow and fit it
+nb_final_wf <- nb_wf %>%
+  finalize_workflow(nb_best_tune) %>%
+  fit(data = ggg_train)
+
+# Predict class (Naive Bayes)
+nb_preds <- predict(nb_final_wf,
+                     new_data = ggg_test,
+                     type = "class") %>%
+  bind_cols(ggg_test$id, .) %>%
+  rename(type = .pred_class) %>%
+  rename(id = ...1) %>%
+  select(id, type)
+
+# Create a CSV with the predictions
+vroom_write(x=nb_preds, file="nb_preds_5.csv", delim = ",")
+
